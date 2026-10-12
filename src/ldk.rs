@@ -40,9 +40,9 @@ use lightning::onion_message::messenger::{
     DefaultMessageRouter, OnionMessenger as LdkOnionMessenger,
 };
 use lightning::rgb_utils::{
-    deserialize_fascia, get_rgb_channel_info_pending, is_channel_rgb, update_rgb_channel_amount,
-    RgbKvStoreExt, RGB_COMMITMENT_FASCIA_NS, RGB_PAYMENT_INFO_INBOUND_NS,
-    RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
+    deserialize_fascia, get_rgb_channel_info_pending, is_channel_rgb, supported_asset_schemas,
+    update_rgb_channel_amount, RgbKvStoreExt, ETH_RPC_URL_FNAME, RGB_COMMITMENT_FASCIA_NS,
+    RGB_PAYMENT_INFO_INBOUND_NS, RGB_PAYMENT_INFO_OUTBOUND_NS, RGB_PRIMARY_NS,
 };
 use lightning::rgb_utils::{RgbPaymentInfo, TransferInfo, STATIC_BLINDING};
 use lightning::routing::gossip;
@@ -3464,15 +3464,26 @@ async fn handle_ldk_events(
                     let consignment =
                         RgbTransfer::load(&mut std::io::Cursor::new(consignment_data))
                             .expect("successful consignment load");
+                    // BFA metadata validation performs blocking Ethereum RPC calls. Keep the
+                    // consignment until registration succeeds so a temporary RPC failure can
+                    // replay this event without losing the asset's metadata.
+                    let state_copy = unlocked_state.clone();
+                    let txid_copy = funding_txid.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        state_copy.rgb_save_new_asset(consignment, txid_copy)
+                    })
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) if e.to_string().contains("UNIQUE constraint failed") => {}
+                        result => {
+                            tracing::error!("Failed saving funding asset: {result:?}");
+                            return Err(ReplayEvent());
+                        }
+                    }
                     unlocked_state
                         .kv_store
                         .remove_rgb_consignment(&funding_txid);
-
-                    match unlocked_state.rgb_save_new_asset(consignment, funding_txid.clone()) {
-                        Ok(_) => {}
-                        Err(e) if e.to_string().contains("UNIQUE constraint failed") => {}
-                        Err(e) => panic!("Failed saving asset: {e}"),
-                    }
 
                     // the consignment record can stop counting against the node-wide cap
                     unlocked_state
@@ -4497,19 +4508,16 @@ pub(crate) async fn maybe_restore_rgb_from_vss(
     }
 }
 
-// rgb-lib rejects wallets supporting IFA on mainnet
-// BFA is opt-in: rgb-lib refuses to go online for a BFA-capable wallet without an Ethereum RPC
-// endpoint (it validates incoming BFA consignments against the bridge contract's FundsIn logs),
-// so the schema is only enabled when one is configured.
-fn supported_asset_schemas(bitcoin_network: BitcoinNetwork, bfa: bool) -> Vec<AssetSchema> {
-    let mut schemas = vec![AssetSchema::Nia, AssetSchema::Cfa, AssetSchema::Uda];
+fn sync_ln_eth_rpc_url(
+    kv_store: &dyn KVStoreSync,
+    bitcoin_network: BitcoinNetwork,
+    eth_rpc_url: Option<&str>,
+) {
     if bitcoin_network != BitcoinNetwork::Mainnet {
-        schemas.push(AssetSchema::Ifa);
+        // Match the current unlock's on-chain wallet, including after VSS restore.
+        // Empty explicitly disables BFA instead of reusing an old persisted endpoint.
+        kv_store.write_config(ETH_RPC_URL_FNAME, eth_rpc_url.unwrap_or_default());
     }
-    if bfa {
-        schemas.push(AssetSchema::Bfa);
-    }
-    schemas
 }
 
 // A dead background processor must take the node down, not leave it serving without event
@@ -4720,6 +4728,13 @@ async fn reimport_funding_consignments(
             .chain(
                 assets
                     .ifa
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|a| a.asset_id),
+            )
+            .chain(
+                assets
+                    .bfa
                     .unwrap_or_default()
                     .into_iter()
                     .map(|a| a.asset_id),
@@ -5015,6 +5030,7 @@ impl NodeStartup {
             .eth_rpc_url
             .clone()
             .or_else(|| static_state.config.chain.eth_rpc_url.clone());
+        let ln_eth_rpc_url = eth_rpc_url.clone();
         #[cfg(feature = "vss")]
         let rgb_vss_backup = match (&static_state.vss_url, &vss_identity) {
             (Some(vss_url), Some(identity)) => Some((
@@ -5081,6 +5097,11 @@ impl NodeStartup {
         })
         .await
         .map_err(|e| APIError::Unexpected(format!("rgb-lib wallet setup task failed: {e}")))??;
+        sync_ln_eth_rpc_url(
+            kv_store.as_ref(),
+            bitcoin_network,
+            ln_eth_rpc_url.as_deref(),
+        );
         save_config(
             &static_state.db(),
             kv_store.as_ref(),
@@ -7643,6 +7664,38 @@ mod tests {
         );
         assert!(supported_asset_schemas(BitcoinNetwork::Regtest, true).contains(&AssetSchema::Bfa));
         assert!(supported_asset_schemas(BitcoinNetwork::Mainnet, true).contains(&AssetSchema::Bfa));
+    }
+
+    #[test]
+    fn bfa_ln_config_replaces_restored_endpoint_and_clears_when_disabled() {
+        let store = build_kv_store();
+        store.write_config(ETH_RPC_URL_FNAME, "http://old-endpoint.invalid");
+        sync_ln_eth_rpc_url(
+            store.as_ref(),
+            BitcoinNetwork::Regtest,
+            Some("http://127.0.0.1:8545"),
+        );
+        assert_eq!(
+            store.read_config(ETH_RPC_URL_FNAME).unwrap(),
+            "http://127.0.0.1:8545"
+        );
+        sync_ln_eth_rpc_url(store.as_ref(), BitcoinNetwork::Regtest, None);
+        assert_eq!(store.read_config(ETH_RPC_URL_FNAME).unwrap(), "");
+    }
+
+    #[test]
+    fn bfa_ln_config_preserves_inactive_mainnet_state() {
+        let store = build_kv_store();
+        store.write_config(ETH_RPC_URL_FNAME, "http://historical-endpoint.invalid");
+        sync_ln_eth_rpc_url(
+            store.as_ref(),
+            BitcoinNetwork::Mainnet,
+            Some("http://127.0.0.1:8545"),
+        );
+        assert_eq!(
+            store.read_config(ETH_RPC_URL_FNAME).unwrap(),
+            "http://historical-endpoint.invalid"
+        );
     }
 
     #[test]

@@ -4745,10 +4745,6 @@ pub(crate) async fn open_channel(
             let schema = unlocked_state
                 .rgb_get_asset_metadata(*contract_id)?
                 .asset_schema;
-            // the LN-side RGB wallet does not support the BFA schema
-            if schema == RgbLibAssetSchema::Bfa {
-                return Err(APIError::UnsupportedSchema(s!("Bfa")));
-            }
             if !is_virtual_open {
                 let mut fake_p2wsh: [u8; 34] = [0; 34];
                 fake_p2wsh[1] = 32;
@@ -4757,11 +4753,10 @@ pub(crate) async fn open_channel(
                     recipient_id_from_script_buf(script_buf, state.static_state.network)?;
                 let asset_id = contract_id.to_string();
                 let assignment = match schema {
-                    RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa => {
+                    RgbLibAssetSchema::Nia | RgbLibAssetSchema::Cfa | RgbLibAssetSchema::Ifa | RgbLibAssetSchema::Bfa => {
                         RgbLibAssignment::Fungible(*asset_amount)
                     }
                     RgbLibAssetSchema::Uda => RgbLibAssignment::NonFungible,
-                    RgbLibAssetSchema::Bfa => unreachable!("rejected above"),
                 };
 
                 let recipient_map = map! {

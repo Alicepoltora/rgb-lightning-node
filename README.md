@@ -14,6 +14,14 @@ dedicated extra output containing the anchor to the RGB state transition.
 More context on how RGB works on the Lightning Network can be found
 [here](https://docs.rgb.info/lightning-network-compatibility).
 
+BFA (Bridged Fungible Assets) can also fund native Lightning channels and use the
+same invoices, payments and channel-close APIs as the other fungible RGB assets.
+Each participant must configure `eth_rpc_url` in its unlock request or
+`[chain]` configuration so incoming funding consignments can validate the bridge's
+Ethereum events. Supply it again on unlock after a restart or restore when it is
+not in the node configuration. Mint and burn remain on-chain operations.
+See [BFA Lightning tests](test/bfa-lightning.md) for the regtest lifecycle test.
+
 The node supports the regtest, signet, testnet3, testnet4 and mainnet networks,
 selected at startup via the `--network` flag (accepted values: `regtest`,
 `signet`, `signetcustom`, `testnet`/`testnet3`, `testnet4`, `mainnet`/`bitcoin`).

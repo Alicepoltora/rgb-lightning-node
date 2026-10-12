@@ -4760,7 +4760,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib"
 version = "0.3.0-beta.7"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.47-bfa#74a096a5bfbba7744af16c36c3595a24464c134c"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?rev=840e22a896f531bd292b5c855e2fc4ba00c51b48#840e22a896f531bd292b5c855e2fc4ba00c51b48"
 dependencies = [
  "amplify",
  "base64 0.22.1",
@@ -4803,7 +4803,7 @@ dependencies = [
 [[package]]
 name = "rgb-lib-migration"
 version = "0.3.0-beta.5"
-source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?tag=v0.3.0-beta.47-bfa#74a096a5bfbba7744af16c36c3595a24464c134c"
+source = "git+https://github.com/UTEXO-Protocol/rgb-lib.git?rev=840e22a896f531bd292b5c855e2fc4ba00c51b48#840e22a896f531bd292b5c855e2fc4ba00c51b48"
 dependencies = [
  "sea-orm-migration 2.0.2",
  "tokio",
