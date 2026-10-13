@@ -63,6 +63,50 @@ pub fn clear_uniffi_state_for_tests() {
     crate::clear_uniffi_app_state();
 }
 
+/// Exercise the REST channel handler against an SDK node's real unlocked state.
+#[cfg(feature = "uniffi")]
+pub fn open_channel_via_rest_for_tests(
+    node: &crate::SdkNode,
+    request_json: &str,
+) -> Result<String, String> {
+    let request = serde_json::from_str(request_json).map_err(|e| e.to_string())?;
+    // The DB runtime is single-threaded; running a full route on it can deadlock
+    // nested wallet/database calls. Keep peer I/O alive after this call returns.
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RT.get_or_init(|| tokio::runtime::Runtime::new().unwrap());
+    let response = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            crate::routes::open_channel(
+                axum::extract::State(node.handle.app_state()),
+                axum_extra::extract::WithRejection(axum::Json(request), std::marker::PhantomData),
+            ),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+    })?;
+    Ok(response.0.temporary_channel_id)
+}
+
+/// Enable private-channel forwarding for isolated multi-hop integration fixtures.
+#[cfg(feature = "uniffi")]
+pub fn enable_private_forwarding_for_tests(node: &crate::SdkNode) {
+    let state = node.handle.app_state();
+    let unlocked = crate::runtime::block_on(async {
+        state
+            .get_unlocked_app_state()
+            .await
+            .as_ref()
+            .cloned()
+            .unwrap()
+    });
+    let lightning = unlocked.lightning().unwrap();
+    let mut config = lightning.channel_manager.get_current_config();
+    config.accept_forwards_to_priv_channels = true;
+    lightning.channel_manager.set_current_config(config);
+}
+
 pub fn node_handle_from_mock_state_for_tests(state: &TestAppState) -> NodeHandle {
     NodeHandle::from_app_state(state.0.clone())
 }
